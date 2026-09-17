@@ -17,7 +17,7 @@ function updateInput() {
 
 input.addEventListener('input', updateInput);
 
-form.addEventListener('submit', async (event) => {
+form.addEventListener('submit', (event) => {
   event.preventDefault();
   updateInput();
 
@@ -27,21 +27,11 @@ form.addEventListener('submit', async (event) => {
     return;
   }
 
-  submitButton.disabled = true;
-  submitButton.classList.add('is-loading');
-
-  try {
-    // Fetch once before navigation so the dashboard can render immediately from
-    // session storage, while Refresh can still request the latest live value.
-    const result = await window.attendanceApi(input.value);
-    sessionStorage.setItem('attendance-result', JSON.stringify(result));
-    sessionStorage.setItem('attendance-ticket', input.value);
-    location.href = 'attendance.html';
-  } catch (error) {
-    errorNode.textContent = error.message;
-    submitButton.classList.remove('is-loading');
-    submitButton.disabled = false;
-  }
+  // The default Overall Attendance view is in maintenance mode, so entering
+  // the dashboard must not request the unavailable overview first.
+  sessionStorage.removeItem('attendance-result');
+  sessionStorage.setItem('attendance-ticket', input.value);
+  location.href = 'attendance.html';
 });
 
 forgotButton.addEventListener('click', () => { forgotForm.hidden = !forgotForm.hidden; if (!forgotForm.hidden) forgotName.focus(); });

@@ -2,12 +2,18 @@ import * as cheerio from 'cheerio';
 import PDFDocument from 'pdfkit';
 import { AttendanceError } from './collegeAttendanceService.js';
 
-const BASE_URL = 'https://scce.ac.in/parentm/';
+const BASE_URL = 'https://scce.ac.in/parent12/';
+const LOGIN_URL = `${BASE_URL}index.php`;
+const PROFILE_URL = `${BASE_URL}info.php`;
+const DAILY_REPORT_URL = `${BASE_URL}Dailywisereport.php`;
+const PROFILE_PATH = 'info.php';
+const DAILY_REPORT_PATH = 'Dailywisereport.php';
 const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
 const number = (value) => Number(clean(value).match(/\d+/)?.[0] || 0);
 const PUBLIC_BASE_URL = 'https://scce.ac.in/parent12/';
 const RESULTS_URL = 'https://scce.ac.in/result/index.php';
 const timeoutMs = Number(process.env.COLLEGE_REQUEST_TIMEOUT_MS || 12000);
+const dailyTimeoutMs = Number(process.env.COLLEGE_DAILY_REQUEST_TIMEOUT_MS || 60000);
 
 async function publicPost(url, fields) {
   const controller = new AbortController();
@@ -201,16 +207,38 @@ export async function getBonafidePdf(hallTicket) {
  * Hall Ticket number, then give callers a request helper bound to that cookie.
  * Cookies never leave the server or appear in the browser response.
  */
-async function withStudentSession(hallTicket, task) {
+function mergeSessionCookies(currentCookie, headers) {
+  const setCookies = typeof headers.getSetCookie === 'function'
+    ? headers.getSetCookie()
+    : [headers.get('set-cookie')].filter(Boolean);
+  const cookies = new Map(
+    String(currentCookie || '').split(/;\s*/).filter(Boolean).map((item) => {
+      const [name] = item.split('=', 1);
+      return [name, item];
+    })
+  );
+
+  setCookies.forEach((header) => {
+    const cookie = header.split(';', 1)[0];
+    const [name] = cookie.split('=', 1);
+    if (name) cookies.set(name, cookie);
+  });
+
+  return [...cookies.values()].join('; ');
+}
+
+async function withStudentSession(hallTicket, task, requestTimeoutMs = timeoutMs) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12000);
+  const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
 
   try {
-    const start = await fetch(BASE_URL, {
+    // The bare /parent12/ directory currently returns a server error. The
+    // profile page is the stable public entry point that creates PHPSESSID.
+    const start = await fetch(PROFILE_URL, {
       redirect: 'manual',
       signal: controller.signal
     });
-    const cookie = start.headers.get('set-cookie')?.split(';')[0];
+    let cookie = mergeSessionCookies('', start.headers);
 
     if (!cookie) {
       throw new AttendanceError(
@@ -219,7 +247,7 @@ async function withStudentSession(hallTicket, task) {
       );
     }
 
-    const login = await fetch(`${BASE_URL}index.php`, {
+    const login = await fetch(LOGIN_URL, {
       method: 'POST',
       redirect: 'manual',
       signal: controller.signal,
@@ -232,6 +260,7 @@ async function withStudentSession(hallTicket, task) {
         submit: 'Login'
       })
     });
+    cookie = mergeSessionCookies(cookie, login.headers);
     const location = login.headers.get('location');
 
     if (!location) {
@@ -239,13 +268,14 @@ async function withStudentSession(hallTicket, task) {
     }
 
     // Visit the redirect once so the session is in the same state as SCCE's UI.
-    await fetch(new URL(location, `${BASE_URL}index.php`), {
+    const redirectResponse = await fetch(new URL(location, LOGIN_URL), {
       signal: controller.signal,
       headers: {
         cookie,
-        referer: BASE_URL
+        referer: LOGIN_URL
       }
     });
+    cookie = mergeSessionCookies(cookie, redirectResponse.headers);
 
     const request = async (path, options = {}) => {
       // Spread custom options first, then merge headers so a POST cannot drop
@@ -255,7 +285,7 @@ async function withStudentSession(hallTicket, task) {
         ...options,
         headers: {
           cookie,
-          referer: BASE_URL,
+          referer: LOGIN_URL,
           ...(options.headers || {})
         }
       });
@@ -284,10 +314,29 @@ async function withStudentSession(hallTicket, task) {
   }
 }
 
-/** Read the real profile table and select the non-logo image when SCCE provides one. */
+function findStudentPhoto($) {
+  const images = $('img[src]').toArray().map((image) => {
+    const element = $(image);
+    return {
+      source: element.attr('src'),
+      context: [
+        element.attr('alt'), element.attr('id'), element.attr('class'),
+        element.closest('td, tr, div').text(), element.attr('width'), element.attr('height')
+      ].filter(Boolean).join(' ')
+    };
+  }).filter(({ source }) => source && !/(logo|banner|header|college|scce|sree|chaitanya)/i.test(source));
+
+  // SCCE sometimes uses a Hall-Ticket filename with no useful image metadata.
+  // Prefer explicitly identified photos, then use the first non-brand asset.
+  return images.find(({ source, context }) =>
+    /(student|photo|profile|passport|upload|hallticket|htno)/i.test(`${source} ${context}`)
+  )?.source || images[0]?.source || null;
+}
+
+/** Read the real profile table and use a photo only when SCCE identifies it as student data. */
 export async function getProfile(hallTicket) {
   return withStudentSession(hallTicket, async (request) => {
-    const { response, html } = await request('info.php');
+    const { response, html } = await request(PROFILE_PATH);
 
     if (!response.ok) {
       throw new AttendanceError('PORTAL_UNAVAILABLE', 'Unable to load profile right now.');
@@ -308,11 +357,7 @@ export async function getProfile(hallTicket) {
       }
     });
 
-    // The first site image is often the college logo, not the student photo.
-    const photoSource = $('img[src]')
-      .map((_index, image) => $(image).attr('src'))
-      .get()
-      .find((source) => source && !/logo/i.test(source));
+    const photoSource = findStudentPhoto($);
 
     return {
       fields,
@@ -407,7 +452,7 @@ export async function getAllDates(hallTicket) {
 
 export async function getDailyReports(hallTicket, selectedDate = '') {
   return withStudentSession(hallTicket, async (request) => {
-    let result = await request('Dailywisereport.php');
+    let result = await request(DAILY_REPORT_PATH);
     const $ = cheerio.load(result.html);
     const availableDates = $('select[name="date"] option')
       .map((_index, option) => ({
@@ -422,7 +467,7 @@ export async function getDailyReports(hallTicket, selectedDate = '') {
     }
 
     // The portal expects a POST plus its `dayatten` submit value for a date.
-    result = await request('Dailywisereport.php', {
+    result = await request(DAILY_REPORT_PATH, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -436,5 +481,5 @@ export async function getDailyReports(hallTicket, selectedDate = '') {
       selectedDate,
       records: parseDailyReport(result.html, selectedDate)
     };
-  });
+  }, dailyTimeoutMs);
 }

@@ -51,10 +51,11 @@ The backend reads environment variables from `backend/.env`, which is intentiona
 PORT=5000
 NODE_ENV=development
 FRONTEND_ORIGIN=http://localhost:5000
-COLLEGE_ATTENDANCE_URL=https://scce.ac.in/parentm/index.php
+COLLEGE_ATTENDANCE_URL=https://scce.ac.in/parent12
 COLLEGE_ATTENDANCE_METHOD=POST
 COLLEGE_HALL_TICKET_FIELD=HallticketNo
 COLLEGE_REQUEST_TIMEOUT_MS=12000
+COLLEGE_DAILY_REQUEST_TIMEOUT_MS=60000
 ```
 
 Keep production-specific values and credentials out of source code. Never expose SCCE session cookies to the frontend.

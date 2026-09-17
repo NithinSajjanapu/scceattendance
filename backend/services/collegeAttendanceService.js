@@ -289,7 +289,7 @@ export async function lookupAttendance(hallTicket) {
         signal: controller.signal,
         headers: {
           cookie,
-          referer: 'https://scce.ac.in/parentm/'
+          referer: new URL('./', url).toString()
         }
       });
       const attendanceHtml = await attendanceResponse.text();

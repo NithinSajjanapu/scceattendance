@@ -213,28 +213,134 @@ export function parseAttendanceHtml(html, hallTicket) {
   };
 }
 
+const PORTAL_BASE_URL = 'https://scce.ac.in/parent12/';
+
+function mergeCookies(cookieHeader, headers) {
+  const setCookies = typeof headers.getSetCookie === 'function'
+    ? headers.getSetCookie()
+    : [headers.get('set-cookie')].filter(Boolean);
+  const cookies = new Map(String(cookieHeader || '').split(/;\s*/).filter(Boolean).map((item) => {
+    const [name] = item.split('=', 1);
+    return [name, item];
+  }));
+  setCookies.forEach((header) => {
+    const cookie = header.split(';', 1)[0];
+    const [name] = cookie.split('=', 1);
+    if (name) cookies.set(name, cookie);
+  });
+  return [...cookies.values()].join('; ');
+}
+
+function readProfileValue($, fieldLabel) {
+  let value = '';
+  const target = fieldLabel.toLowerCase().replace(/[^a-z]/g, '');
+
+  $('body *').each((_index, element) => {
+    if (value) return;
+    const ownText = clean($(element).contents().filter((_i, node) => node.type === 'text').text())
+      .replace(/^[:\s]+|[:\s]+$/g, '');
+    if (ownText.toLowerCase().replace(/[^a-z]/g, '') !== target) return;
+
+    const siblings = $(element).parent().children().toArray();
+    const position = siblings.indexOf(element);
+    for (const sibling of siblings.slice(position + 1)) {
+      const siblingText = clean($(sibling).text()).replace(/^[:\s]+/, '');
+      if (siblingText) {
+        value = siblingText;
+        return;
+      }
+    }
+  });
+
+  if (value) return value;
+  const pageText = clean($('body').text());
+  const nextLabel = fieldLabel.toLowerCase() === 'student name' ? 'Father Name' : 'Student Name';
+  const match = pageText.match(new RegExp(`${fieldLabel}\\s*:?\\s*(.+?)\\s*(?=${nextLabel}|$)`, 'i'));
+  return match ? clean(match[1]).replace(/^:/, '').trim() : '';
+}
+
+function parsePortalProfile(html, hallTicket) {
+  const $ = cheerio.load(html);
+  return {
+    hallTicket: readProfileValue($, 'Hallticket No') || hallTicket,
+    name: readProfileValue($, 'Student Name') || 'Student'
+  };
+}
+
+function collectSubmitForm($, hallTicket) {
+  const $form = $('form').filter((_index, form) => $(form).find('input[type="submit"], button[type="submit"], button:not([type])').length > 0).first();
+  if (!$form.length) throw new AttendanceError('UNREADABLE_RESPONSE', 'Unable to read the attendance form.');
+
+  const params = new URLSearchParams();
+  $form.find('input[name], select[name], textarea[name]').each((_index, element) => {
+    const $element = $(element);
+    const name = $element.attr('name');
+    const type = ($element.attr('type') || '').toLowerCase();
+    if (!name || ['submit', 'button', 'image', 'file'].includes(type)) return;
+    if (['checkbox', 'radio'].includes(type) && !$element.is(':checked')) return;
+    const value = type === 'checkbox' || type === 'radio'
+      ? ($element.attr('value') || 'on')
+      : ($element.val() ?? '');
+    params.append(name, /hall.?ticket|htno/i.test(name) ? hallTicket : String(value));
+  });
+
+  const $submit = $form.find('input[type="submit"], button[type="submit"], button:not([type])').first();
+  if ($submit.length && $submit.attr('name')) {
+    params.append($submit.attr('name'), $submit.attr('value') || clean($submit.text()) || 'Submit');
+  }
+
+  return {
+    url: new URL($form.attr('action') || 'Dailywise1.php', PORTAL_BASE_URL).toString(),
+    method: ($form.attr('method') || 'GET').toUpperCase(),
+    params
+  };
+}
+
+function parseOverallAttendance(html) {
+  const $ = cheerio.load(html);
+  let overall = null;
+  $('tr').each((_index, row) => {
+    if (overall) return;
+    const cells = $(row).find('th, td').map((_cellIndex, cell) => clean($(cell).text())).get();
+    if (!cells.length || !/^total\b/i.test(cells[0])) return;
+    const attended = Number(cells[1]?.match(/[\d,]+/)?.[0]?.replace(/,/g, ''));
+    const conducted = Number(cells[2]?.match(/[\d,]+/)?.[0]?.replace(/,/g, ''));
+    const percentage = Number(cells[3]?.match(/[\d.]+/)?.[0]);
+    if ([attended, conducted, percentage].every(Number.isFinite)) {
+      overall = { attended, conducted, percentage: Math.round(percentage) };
+    }
+  });
+  if (!overall) throw new AttendanceError('UNREADABLE_RESPONSE', 'Unable to read overall attendance totals.');
+  return overall;
+}
+
+function parseAttendanceSubjects(html) {
+  const $ = cheerio.load(html);
+  const subjects = new Map();
+  $('tr').each((_index, row) => {
+    const cells = $(row).find('td, th').map((_cellIndex, cell) => clean($(cell).text())).get();
+    if (cells.length < 5 || !/^\d+$/.test(cells[0]) || /^total\b/i.test(cells[0])) return;
+    const name = cells[1];
+    const attended = Number(cells[2]?.match(/[\d,]+/)?.[0]?.replace(/,/g, ''));
+    const conducted = Number(cells[3]?.match(/[\d,]+/)?.[0]?.replace(/,/g, ''));
+    if (!name || !Number.isFinite(attended) || !Number.isFinite(conducted)) return;
+    const current = subjects.get(name) || { name, attended: 0, conducted: 0 };
+    current.attended += attended;
+    current.conducted += conducted;
+    subjects.set(name, current);
+  });
+  return [...subjects.values()].map((subject) => ({
+    ...subject,
+    percentage: percent('', subject.attended, subject.conducted)
+  }));
+}
+
 /**
  * SCCE creates a PHP session before it accepts a Hall Ticket request. Keep the
  * cookie server-side, submit the ticket, and follow the redirect with that same
  * cookie before parsing the returned attendance table.
  */
 export async function lookupAttendance(hallTicket) {
-  const url = process.env.COLLEGE_ATTENDANCE_URL;
-
-  if (!url) {
-    throw new AttendanceError(
-      'INTEGRATION_NOT_CONFIGURED',
-      'Live attendance lookup has not been configured yet. Please contact the portal administrator.',
-      503
-    );
-  }
-
-  const method = (process.env.COLLEGE_ATTENDANCE_METHOD || 'POST').toUpperCase();
-  const field = process.env.COLLEGE_HALL_TICKET_FIELD || 'hallTicket';
-  const params = new URLSearchParams({
-    ...parseStaticFields(),
-    [field]: hallTicket
-  });
   const controller = new AbortController();
   const timeout = setTimeout(
     () => controller.abort(),
@@ -242,80 +348,68 @@ export async function lookupAttendance(hallTicket) {
   );
 
   try {
-    // Open the portal first so PHP sends the session cookie required by login.
-    const sessionUrl = new URL('./', url).toString();
-    const sessionResponse = await fetch(sessionUrl, {
-      method: 'GET',
-      redirect: 'manual',
-      signal: controller.signal
-    });
-    const setCookie = sessionResponse.headers.get('set-cookie');
-
-    if (!setCookie) {
+    const profileUrl = new URL('info.php', PORTAL_BASE_URL).toString();
+    const loginUrl = new URL('index.php', PORTAL_BASE_URL).toString();
+    const sessionResponse = await fetch(profileUrl, { redirect: 'manual', signal: controller.signal });
+    let cookie = mergeCookies('', sessionResponse.headers);
+    if (!cookie) {
       throw new AttendanceError(
         'PORTAL_UNAVAILABLE',
         'Unable to establish a session with the attendance portal.'
       );
     }
 
-    const cookie = setCookie.split(';')[0];
-    const response = await fetch(url, {
-      method,
+    const login = await fetch(loginUrl, {
+      method: 'POST',
       redirect: 'manual',
       signal: controller.signal,
       headers: {
         'content-type': 'application/x-www-form-urlencoded',
         cookie
       },
-      body: method === 'POST' ? params : undefined
+      body: new URLSearchParams({ HallticketNo: hallTicket, submit: 'Login' })
     });
-    const html = await response.text();
+    cookie = mergeCookies(cookie, login.headers);
+    const redirectLocation = login.headers.get('location');
+    if (!redirectLocation) throw new AttendanceError('NOT_FOUND', 'No student record found.', 404);
+    const landingResponse = await fetch(new URL(redirectLocation, loginUrl), {
+      signal: controller.signal,
+      headers: { cookie, referer: loginUrl }
+    });
+    cookie = mergeCookies(cookie, landingResponse.headers);
 
-    // Follow the PHP redirect manually so the same session reaches the report.
-    if (response.status >= 300 && response.status < 400) {
-      const location = response.headers.get('location');
-
-      if (!location) {
-        throw new AttendanceError(
-          'PORTAL_UNAVAILABLE',
-          'Attendance portal returned an invalid redirect.'
-        );
-      }
-
-      const redirectUrl = new URL(location, url).toString();
-      const attendanceResponse = await fetch(redirectUrl, {
-        method: 'GET',
-        redirect: 'follow',
+    const request = async (url, options = {}) => {
+      const response = await fetch(url, {
         signal: controller.signal,
-        headers: {
-          cookie,
-          referer: new URL('./', url).toString()
-        }
+        ...options,
+        headers: { cookie, referer: loginUrl, ...(options.headers || {}) }
       });
-      const attendanceHtml = await attendanceResponse.text();
+      return { response, html: await response.text() };
+    };
 
-      if (!attendanceResponse.ok && !attendanceHtml.includes('Attendance Report')) {
-        throw new AttendanceError(
-          'PORTAL_UNAVAILABLE',
-          'Attendance portal is temporarily unavailable. Please try again later.'
-        );
-      }
-
-      if (/no record|not found|invalid hall|does not exist/i.test(attendanceHtml)) {
-        throw new AttendanceError('NOT_FOUND', 'No attendance record found.', 404);
-      }
-
-      return parseAttendanceHtml(attendanceHtml, hallTicket);
+    const profileResult = await request(profileUrl);
+    const attendanceUrl = new URL('Dailywise1.php', PORTAL_BASE_URL).toString();
+    const formResult = await request(attendanceUrl);
+    if (!profileResult.response.ok || !formResult.response.ok) {
+      throw new AttendanceError('PORTAL_UNAVAILABLE', 'Attendance portal is temporarily unavailable.');
     }
+    const $formPage = cheerio.load(formResult.html);
+    const form = collectSubmitForm($formPage, hallTicket);
+    const submitOptions = form.method === 'POST'
+      ? { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form.params }
+      : { method: 'GET' };
+    const submitUrl = form.method === 'POST'
+      ? form.url
+      : `${form.url}${form.url.includes('?') ? '&' : '?'}${form.params.toString()}`;
+    const report = await request(submitUrl, submitOptions);
+    if (!report.response.ok) throw new AttendanceError('PORTAL_UNAVAILABLE', 'Attendance portal is temporarily unavailable.');
 
-    if (!response.ok) {
-      throw new AttendanceError(
-        'PORTAL_UNAVAILABLE',
-        'Attendance portal is temporarily unavailable. Please try again later.'
-      );
-    }
-
-    return parseAttendanceHtml(html, hallTicket);
+    return {
+      student: parsePortalProfile(profileResult.html, hallTicket),
+      subjects: parseAttendanceSubjects(report.html),
+      totalSubjects: null,
+      overall: parseOverallAttendance(report.html)
+    };
   } catch (error) {
     if (error instanceof AttendanceError) throw error;
 

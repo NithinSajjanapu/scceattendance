@@ -20,6 +20,53 @@ function initialsFromName(name) {
     .map((part) => part.charAt(0).toUpperCase()).join('') || 'S';
 }
 
+function toNumber(value) {
+  const number = Number(String(value ?? '').replace('%', '').trim());
+  return Number.isFinite(number) ? number : 0;
+}
+
+function attendanceStatus(percentage) {
+  if (percentage <= 35) return ['critical', 'Critical'];
+  if (percentage < 55) return ['low', 'Low'];
+  if (percentage < 65) return ['warning', 'Improve'];
+  if (percentage < 75) return ['caution', 'Watch'];
+  return ['good', 'Good'];
+}
+
+function renderAttendance(data) {
+  const subjects = (Array.isArray(data.subjects) ? data.subjects : []).map((subject) => {
+    const attended = toNumber(subject.attended);
+    const conducted = toNumber(subject.conducted);
+    return { name: String(subject.name || 'Unnamed subject'), attended, conducted,
+      percentage: conducted ? Math.round(attended / conducted * 100) : toNumber(subject.percentage) };
+  });
+  const attended = toNumber(data.overall?.attended);
+  const conducted = toNumber(data.overall?.conducted);
+  const percentage = toNumber(data.overall?.percentage);
+  const student = { hallTicket: data.student?.hallTicket || state.hallTicket || '—', name: data.student?.name || 'Student' };
+  const [statusClass, statusLabel] = attendanceStatus(percentage);
+  const belowThreshold = subjects.filter((subject) => subject.percentage < 75).length;
+
+  content.innerHTML = `
+    <section class="dash-title reveal"><div><p class="eyebrow">STUDENT DASHBOARD</p><h1>Attendance overview</h1><p class="college-name">Sree Chaitanya College of Engineering</p></div><span class="status-pill ${statusClass}"><i></i>${statusLabel} attendance</span></section>
+    <section class="student-card reveal"><div class="student-avatar" aria-hidden="true">${escapeHtml(initialsFromName(student.name))}</div><div><span>STUDENT</span><h2 class="student-name">${escapeHtml(student.name)}</h2><p>${escapeHtml(student.hallTicket)}</p></div></section>
+    <section class="overview-grid">
+      <article class="overall-card reveal"><div><p>OVERALL ATTENDANCE</p><h2>${attended} <span>/ ${conducted} classes</span></h2><p class="overall-caption">Attend consistently to stay on track.</p></div><div class="progress-circle ${statusClass}" style="--progress:0" data-progress="${percentage}" aria-label="Overall attendance: ${percentage}%"><div class="progress-circle-label"><strong data-count="${percentage}">0</strong><small>%</small></div></div></article>
+      <article class="stats-card reveal"><span>◫</span><p>Total subjects</p><strong>${data.totalSubjects ?? 'N/A'}</strong></article><article class="stats-card reveal"><span>✓</span><p>Classes attended</p><strong>${attended}</strong></article><article class="stats-card reveal"><span>◷</span><p>Classes conducted</p><strong>${conducted}</strong></article>
+    </section>
+    <!-- Temporarily hidden; remove the hidden attributes to restore subject breakdown and below-75% count. -->
+    <section class="section-heading reveal" hidden><div><p class="eyebrow">SUBJECT BREAKDOWN</p><h2>Subject attendance</h2></div><span>${belowThreshold} below 75%</span></section>
+    <section class="subject-list reveal" hidden>${subjects.map((subject, index) => { const [level, label] = attendanceStatus(subject.percentage); return `<article class="subject-card reveal" style="--delay:${index * 45}ms"><div class="subject-name"><h3>${escapeHtml(subject.name)}</h3><span>${subject.attended} / ${subject.conducted} classes</span></div><strong class="subject-percent">${subject.percentage}%</strong><span class="status-pill ${level}">${label}</span></article>`; }).join('')}</section>`;
+
+  content.querySelectorAll('.reveal').forEach((element) => element.classList.add('visible'));
+  content.querySelectorAll('.progress-circle').forEach((circle) => { circle.style.setProperty('--progress', circle.dataset.progress); });
+  content.querySelectorAll('[data-count]').forEach((element) => { element.textContent = element.dataset.count; });
+  loadingPanel.hidden = true;
+  errorPanel.hidden = true;
+  content.hidden = false;
+  refreshButton.disabled = false;
+}
+
 function setLoading(isLoading) {
   loadingPanel.hidden = !isLoading;
   content.hidden = isLoading;
@@ -87,7 +134,7 @@ function renderSection(section, data = {}) {
   clearBonafideResizeObserver();
 
   if (section === 'attendance') {
-    renderAttendanceMaintenance();
+    renderAttendance(data);
   } else if (section === 'all-dates') {
     renderAllDatesMaintenance();
   } else if (section === 'profile') {
@@ -181,15 +228,17 @@ async function loadSection(section, date = '') {
     return;
   }
 
-  // Unavailable views appear at once and never reach the backend.
-  if (section === 'attendance' || section === 'all-dates') {
+  // All Dates remains in its existing maintenance state.
+  if (section === 'all-dates') {
     renderSection(section);
     return;
   }
 
   setLoading(true);
   try {
-    const data = await window.portalApi(section, { hallTicket: state.hallTicket, date });
+    const data = section === 'attendance'
+      ? await window.attendanceApi(state.hallTicket)
+      : await window.portalApi(section, { hallTicket: state.hallTicket, date });
     if (requestId !== latestRequestId) return;
     renderSection(section, data);
   } catch (error) {

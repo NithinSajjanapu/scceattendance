@@ -103,18 +103,62 @@ function renderAttendanceMaintenance() {
   document.querySelector('#maintenance-daily-button').addEventListener('click', () => loadSection('daily-reports'));
 }
 
-function renderAllDatesMaintenance() {
+function createDateRange(records) {
+  if (!records.length || !/^\d{2}-\d{2}-\d{4}$/.test(records[0].date)) return null;
+
+  const uniqueDates = [...new Set(records.map((record) => record.date)
+    .filter((date) => /^\d{2}-\d{2}-\d{4}$/.test(date)))];
+  if (!uniqueDates.length) return null;
+
+  const toDate = (value) => {
+    const [day, month, year] = value.split('-').map(Number);
+    return new Date(year, month - 1, day);
+  };
+  const dates = uniqueDates.map(toDate).sort((first, second) => first - second);
+  const label = new Intl.DateTimeFormat('en-GB', {
+    day: '2-digit', month: 'short', year: 'numeric'
+  });
+
+  return {
+    start: label.format(dates[0]),
+    end: label.format(dates[dates.length - 1]),
+    days: uniqueDates.length
+  };
+}
+
+function renderAllDates(data = {}) {
+  const records = Array.isArray(data.records) ? data.records : [];
+  const range = createDateRange(records);
+  const days = records.reduce((groups, row) => {
+    (groups[row.date] ||= []).push(row);
+    return groups;
+  }, {});
+
   content.innerHTML = `
-    <section class="maintenance-card">
-      <p class="eyebrow">ATTENDANCE HISTORY</p>
-      <h1>🚧 All Dates is Taking a Break</h1>
-      <p>The All Dates attendance view is temporarily unavailable while we fix things behind the scenes.</p>
-      <p>Please use Daily Attendance to check attendance for a specific date.</p>
-      <p>Your attendance hasn't disappeared — this section is just taking a small break 😴</p>
-      <button class="refresh-button" id="maintenance-daily-button">Go to Daily Attendance</button>
+    <section class="section-heading">
+      <div>
+        <p class="eyebrow">ATTENDANCE HISTORY</p>
+        <h2>All dates</h2>
+        ${range ? `<p class="date-range">${range.start} – ${range.end} <span>•</span> Total ${range.days} Days</p>` : ''}
+      </div>
+    </section>
+    <section class="all-dates-list">
+      ${Object.entries(days).map(([date, rows]) => `
+        <section class="report-day">
+          <p>${escapeHtml(date)}</p>
+          ${rows.map((row) => `
+            <div>
+              <strong>${escapeHtml(row.subject)}</strong>
+              <span class="attendance-status ${row.attended ? 'present' : 'absent'}">
+                ${row.attended ? 'Present' : 'Absent'}
+              </span>
+              <b>${escapeHtml(row.attended)}/${escapeHtml(row.conducted)}</b>
+            </div>
+          `).join('')}
+        </section>
+      `).join('') || '<p class="empty-state">No records available.</p>'}
     </section>
   `;
-  document.querySelector('#maintenance-daily-button').addEventListener('click', () => loadSection('daily-reports'));
 }
 
 function renderSectionError(message) {
@@ -136,7 +180,7 @@ function renderSection(section, data = {}) {
   if (section === 'attendance') {
     renderAttendance(data);
   } else if (section === 'all-dates') {
-    renderAllDatesMaintenance();
+    renderAllDates(data);
   } else if (section === 'profile') {
     const fields = Object.entries(data.fields || {});
     const studentName = data.fields?.['Student Name'] || 'Student';
@@ -225,12 +269,6 @@ async function loadSection(section, date = '') {
 
   if (!state.hallTicket) {
     location.href = 'index.html';
-    return;
-  }
-
-  // All Dates remains in its existing maintenance state.
-  if (section === 'all-dates') {
-    renderSection(section);
     return;
   }
 

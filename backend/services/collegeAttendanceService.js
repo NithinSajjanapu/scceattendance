@@ -342,10 +342,9 @@ function parseAttendanceSubjects(html) {
  */
 export async function lookupAttendance(hallTicket) {
   const controller = new AbortController();
-  const timeout = setTimeout(
-    () => controller.abort(),
-    Number(process.env.COLLEGE_REQUEST_TIMEOUT_MS || 12000)
-  );
+  const configuredTimeout = Number(process.env.COLLEGE_REQUEST_TIMEOUT_MS);
+  const timeoutMs = Math.max(60000, Number.isFinite(configuredTimeout) ? configuredTimeout : 0);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const profileUrl = new URL('info.php', PORTAL_BASE_URL).toString();
@@ -353,6 +352,13 @@ export async function lookupAttendance(hallTicket) {
     const sessionResponse = await fetch(profileUrl, { redirect: 'manual', signal: controller.signal });
     let cookie = mergeCookies('', sessionResponse.headers);
     if (!cookie) {
+      console.warn('[attendance] Portal session bootstrap returned no cookie', {
+        status: sessionResponse.status,
+        responseUrl: sessionResponse.url,
+        contentType: sessionResponse.headers.get('content-type'),
+        server: sessionResponse.headers.get('server'),
+        cfRay: sessionResponse.headers.get('cf-ray')
+      });
       throw new AttendanceError(
         'PORTAL_UNAVAILABLE',
         'Unable to establish a session with the attendance portal.'

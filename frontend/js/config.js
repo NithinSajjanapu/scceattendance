@@ -3,8 +3,8 @@
 // can replace this with its deployed API origin without changing application code.
 window.APP_CONFIG = {
   // The local Express server serves the frontend and API from one origin.
-  // Firebase Hosting continues to use the deployed Render API.
+  // All deployed portal sections use the newer Render service.
   API_BASE_URL: ['localhost', '127.0.0.1'].includes(location.hostname)
     ? ''
-    : 'https://scceattendance.onrender.com'
+    : 'https://scceattendance-1.onrender.com'
 };

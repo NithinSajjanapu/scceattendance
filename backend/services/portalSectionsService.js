@@ -12,8 +12,10 @@ const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
 const number = (value) => Number(clean(value).match(/\d+/)?.[0] || 0);
 const PUBLIC_BASE_URL = 'https://scce.ac.in/parent12/';
 const RESULTS_URL = 'https://scce.ac.in/result/index.php';
-const timeoutMs = Number(process.env.COLLEGE_REQUEST_TIMEOUT_MS || 12000);
-const dailyTimeoutMs = Number(process.env.COLLEGE_DAILY_REQUEST_TIMEOUT_MS || 60000);
+const configuredTimeoutMs = Number(process.env.COLLEGE_REQUEST_TIMEOUT_MS);
+const timeoutMs = Math.max(60000, Number.isFinite(configuredTimeoutMs) ? configuredTimeoutMs : 0);
+const configuredDailyTimeoutMs = Number(process.env.COLLEGE_DAILY_REQUEST_TIMEOUT_MS);
+const dailyTimeoutMs = Math.max(timeoutMs, Number.isFinite(configuredDailyTimeoutMs) ? configuredDailyTimeoutMs : 0);
 
 async function publicPost(url, fields) {
   const controller = new AbortController();

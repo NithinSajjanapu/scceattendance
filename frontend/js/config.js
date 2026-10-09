@@ -6,5 +6,5 @@ window.APP_CONFIG = {
   // All deployed portal sections use the newer Render service.
   API_BASE_URL: ['localhost', '127.0.0.1'].includes(location.hostname)
     ? ''
-    : 'https://scceattendance-1.onrender.com'
+    : 'https://scceattendance-2.onrender.com'
 };
